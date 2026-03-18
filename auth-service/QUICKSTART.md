@@ -42,6 +42,7 @@ cp .env.example .env
 DATABASE_URL=postgresql://user:password@localhost:5432/auth_db
 REDIS_URL=redis://localhost:6379/0
 SECRET_KEY=meu-segredo-super-secreto-mudar-em-producao
+INTERNAL_SERVICE_KEY=change-me-in-production
 DEBUG=True
 ```
 
@@ -52,7 +53,7 @@ DEBUG=True
 ### Opção A: Docker Compose (Recomendado)
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 Espera ~30 segundos para os serviços iniciarem.
@@ -77,7 +78,7 @@ Depois cria a base de dados:
 createdb -U user auth_db
 ```
 
-### Opção B.2: Redis (Opcional, para Logout avançado)
+### Opção B.2: Redis (Necessário)
 
 ```bash
 # macOS
@@ -115,6 +116,19 @@ Abra no teu browser:
 - **Swagger UI**: http://localhost:8000/docs
 - **ReDoc**: http://localhost:8000/redoc
 - **Health Check**: http://localhost:8000/health
+
+---
+
+## ✅ Teste Rápido do Fluxo Web Completo
+
+Para validar o fluxo completo (UI + exchange-code + verify + refresh rotation + logout + forgot/reset via Mailpit):
+
+```bash
+docker compose up -d
+make test-web-flow
+```
+
+Se o comando terminar com `ALL WEB FLOW CHECKS PASSED`, o serviço está pronto para demonstração e integração.
 
 ---
 
@@ -199,9 +213,11 @@ curl -X POST "http://localhost:8000/api/v1/auth/refresh" \
 
 ```bash
 TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+SERVICE_KEY="change-me-in-production"
 
 curl -X POST "http://localhost:8000/api/v1/auth/verify" \
   -H "Content-Type: application/json" \
+  -H "X-Service-Auth: $SERVICE_KEY" \
   -d "{\"token\": \"$TOKEN\"}"
 ```
 
@@ -309,16 +325,23 @@ source venv/bin/activate
 # Verifica se PostgreSQL está rodando:
 psql -U user -d auth_db
 
-# Se não, inicia:
-docker-compose up -d postgres
+# Se não, inicia PostgreSQL e Redis:
+docker compose up -d postgres redis
 ```
 
 ### Erro: `Connection refused` (Redis)
 
-Jest a usar a denylist de tokens? Redis é opcional. Se não precisas, comentar em `.env`:
+Redis é obrigatório para os fluxos de autenticação atuais (denylist, rotação de refresh token e códigos one-time).
+
+```bash
+# Inicia Redis (e PostgreSQL se necessário)
+docker compose up -d redis postgres
+```
+
+Se o erro persistir, confirma a variável no `.env`:
 
 ```env
-# REDIS_URL=redis://localhost:6379/0
+REDIS_URL=redis://localhost:6379/0
 ```
 
 ---

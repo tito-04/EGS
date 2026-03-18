@@ -40,7 +40,7 @@ auth-service/
 ├── Dockerfile                         # Para containerizar a aplicação
 ├── docker-compose.yml                 # PostgreSQL + Redis + App
 ├── test_all_endpoints.py              # 🧪 Script de testes completo
-├── tests_example.py                   # Exemplos de testes com pytest
+├── tests/                             # Suíte de testes de segurança e observabilidade
 ├── QUICKSTART.md                      # Guia rápido de instalação
 └── README.md                          # Este arquivo (documentação)
 ```
@@ -318,6 +318,39 @@ GET /health
   "service": "auth-service",
   "version": "1.0.0"
 }
+
+---
+
+## 🧪 Testes de Segurança (Pytest)
+
+Foi adicionado um conjunto de testes automáticos para validar os fluxos críticos de segurança:
+
+- Validação de `client_id` + `redirect_uri` por cliente
+- Prevenção de replay de authorization code (uso único)
+- Proteção do endpoint `/api/v1/auth/verify` com `X-Service-Auth`
+- Token denylist após logout
+- Fluxos de forgot/reset password (API e UI)
+- Rate limiting nos endpoints de login e forgot-password (retorno HTTP 429)
+
+### Pré-requisito
+
+O serviço deve estar em execução (por exemplo com Docker Compose):
+
+```bash
+docker compose up -d
+```
+
+### Executar os testes
+
+```bash
+make test-security
+```
+
+Alternativamente, sem `make`:
+
+```bash
+python -m pytest -q tests/test_security_flows.py tests/test_rate_limits.py tests/test_production_config.py tests/test_observability.py
+```
 ```
 
 ---
@@ -438,19 +471,116 @@ pip install httpx
 
 ## 📝 Próximos Passos
 
-- [ ] Implementar Redis para token denylist (logout robusto)
-- [ ] Adicionar testes unitários com pytest
-- [ ] Configurar CI/CD (GitHub Actions)
-- [ ] Adicionar rate limiting
+- [x] Implementar Redis para token denylist (logout robusto)
+- [x] Adicionar testes unitários com pytest
+- [x] Configurar CI/CD (GitHub Actions)
+- [x] Adicionar rate limiting
 - [ ] Implementar 2FA (autenticação dois fatores)
-- [ ] Adicionar logging estruturado
-- [ ] Docker e Docker Compose
+- [x] Adicionar logging estruturado
+- [x] Docker e Docker Compose
 
 ---
 
 ## 🤝 Integração com Outros Serviços
 
-### Exemplo: Inventory Service valida token
+### Quickstart (Composer)
+
+1. Iniciar stack local:
+
+```bash
+docker compose up -d
+```
+
+2. Configurar clientes e chave de serviço no `.env` do Auth Service:
+
+```env
+INTERNAL_SERVICE_KEY=<internal-service-key>
+ALLOWED_REDIRECT_ORIGINS=https://flashsale.example.com,https://payment.example.com
+AUTH_CLIENTS_JSON={"flash-sale": ["https://flashsale.example.com/callback"], "payment": ["https://payment.example.com/callback"]}
+DEV_EMAIL_TEST_ENABLED=False
+```
+
+`/api/v1/auth/dev/test-email` deve permanecer desativado em ambientes partilhados/integration.
+
+3. Testar contrato de verificação de token:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/auth/verify \
+  -H 'Content-Type: application/json' \
+  -H 'X-Service-Auth: <internal-service-key>' \
+  -d '{"token":"<jwt>"}'
+```
+
+4. Testar SMTP em ambiente de desenvolvimento:
+
+```bash
+python scripts/test_smtp_email.py --base-url http://localhost:8000 --email dev-inbox@example.com
+```
+
+5. Validar regressão de segurança antes de integrar:
+
+```bash
+make test-security
+```
+
+6. Validar fluxo web completo (UI + code exchange + reset password + logout):
+
+```bash
+make test-web-flow
+```
+
+### 1) Redirect de login (Flash Sale / Payment)
+
+Redireciona o utilizador para o IdP com estes parâmetros obrigatórios:
+
+```text
+GET /ui/login?client_id=<client_id>&redirect_uri=<redirect_uri>&state=<state>
+```
+
+- `client_id`: cliente registado em `AUTH_CLIENTS_JSON`
+- `redirect_uri`: URL permitida para esse `client_id`
+- `state`: valor opaco para anti-CSRF no cliente (opcional, recomendado)
+
+No sucesso, o Auth Service redireciona para:
+
+```text
+<redirect_uri>?code=<authorization_code>&state=<state>
+```
+
+### 2) Troca de código por tokens
+
+Endpoint:
+
+```http
+POST /api/v1/auth/exchange-code
+Content-Type: application/json
+
+{
+  "code": "<authorization_code>",
+  "client_id": "flash-sale"
+}
+```
+
+Resposta de sucesso (200):
+
+```json
+{
+  "access_token": "<jwt>",
+  "refresh_token": "<jwt>",
+  "token_type": "bearer"
+}
+```
+
+Erros típicos:
+
+- `401`: código inválido/expirado/reutilizado ou `client_id` incompatível
+- `503`: indisponibilidade temporária do storage de códigos
+
+### 3) Contrato de /verify (service-to-service)
+
+`/verify` requer o header `X-Service-Auth` com a chave interna do serviço.
+
+Exemplo:
 
 ```python
 import httpx
@@ -459,10 +589,44 @@ async def validate_user_token(token: str):
     async with httpx.AsyncClient() as client:
         response = await client.post(
             "http://auth-service:8000/api/v1/auth/verify",
+            headers={"X-Service-Auth": "<internal-service-key>"},
             json={"token": token}
         )
         return response.json()
 ```
+
+Comportamento esperado:
+
+- `403` quando `X-Service-Auth` está ausente/inválido
+- `200` com `{ "valid": false }` quando token é inválido/revogado/expirado
+- `200` com `{ "valid": true, ... }` quando token é válido
+
+### 4) Observabilidade e auditoria
+
+Todos os pedidos recebem os headers:
+
+- `X-Request-ID`
+- `X-Correlation-ID`
+
+Se o cliente enviar estes headers, o serviço propaga os mesmos valores.
+
+Eventos de auditoria de autenticação são emitidos em JSON (logger `auth.audit`) com campos base:
+
+- `event_type` (`auth_audit`)
+- `request_id`
+- `correlation_id`
+- `action` (ex: `login`, `refresh`, `exchange_code`, `ui_login`)
+- `outcome` (ex: `success`, `failure`, `forbidden`)
+- `path`
+- `client_ip`
+
+Campos de ator/contexto quando disponíveis:
+
+- `user_id`
+- `email`
+- `role`
+- `client_id`
+- `details` (objeto complementar)
 
 ---
 

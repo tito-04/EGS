@@ -61,6 +61,22 @@ class UserCRUD:
         await db.commit()
         await db.refresh(user)
         return user
+
+    @staticmethod
+    async def update_password(db: AsyncSession, user_id: str, hashed_password: str) -> User | None:
+        """Update user password hash."""
+        return await UserCRUD.update_user(db, user_id, hashed_password=hashed_password)
+
+    @staticmethod
+    async def delete_user(db: AsyncSession, user_id: str) -> bool:
+        """Permanently delete user account."""
+        user = await db.get(User, user_id)
+        if not user:
+            return False
+
+        await db.delete(user)
+        await db.commit()
+        return True
     
     @staticmethod
     async def deactivate_user(db: AsyncSession, user_id: str) -> User | None:

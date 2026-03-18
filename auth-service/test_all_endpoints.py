@@ -6,11 +6,13 @@ Tests all 6 endpoints with detailed output
 
 import httpx
 import json
+import os
 from datetime import datetime
 
 # Configuration
 BASE_URL = "http://localhost:8000"
 API_URL = f"{BASE_URL}/api/v1"
+INTERNAL_SERVICE_KEY = os.getenv("INTERNAL_SERVICE_KEY", "change-me-in-production")
 
 # Colors for output
 GREEN = "\033[92m"
@@ -204,13 +206,14 @@ async def test_verify_token():
     
     endpoint = f"{API_URL}/auth/verify"
     payload = {"token": test_login.access_token}
+    headers = {"X-Service-Auth": INTERNAL_SERVICE_KEY}
     
     print_request("POST", endpoint, payload)
     print_info("This endpoint is used by Inventory and Payment services")
     print_info("to validate tokens without parsing them locally\n")
     
     async with httpx.AsyncClient() as client:
-        response = await client.post(endpoint, json=payload)
+        response = await client.post(endpoint, json=payload, headers=headers)
         data = response.json()
         print_response(response.status_code, data)
         

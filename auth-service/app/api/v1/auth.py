@@ -1,19 +1,66 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from starlette.requests import Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import timedelta
+from app.core.config import settings
+from app.core.email import send_password_reset_email, send_dev_test_email
+from app.core.observability import emit_audit_event
+from app.core.rate_limit import limiter
+from app.core.redis_client import get_redis
+from app.core.token_denylist import (
+    denylist_access_token,
+    denylist_refresh_token,
+    is_access_token_denylisted,
+    is_refresh_token_denylisted,
+)
 from app.db import get_db
 from app.schemas.user import (
     UserCreate, UserLogin, UserResponse, TokenResponse,
-    TokenRefresh, TokenVerifyRequest, TokenVerifyResponse
+    TokenRefresh, TokenVerifyRequest, TokenVerifyResponse,
+    ForgotPasswordRequest, ResetPasswordRequest,
+    DeleteAccountRequest, MessageResponse, AuthCodeExchangeRequest,
+    DevEmailTestRequest,
 )
 from app.crud import UserCRUD
 from app.core.security import (
     verify_password, create_access_token, create_refresh_token,
-    verify_token
+    verify_token, create_password_reset_token, hash_password,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+bearer_scheme = HTTPBearer()
+
+
+async def _verify_active_access_token(token: str) -> dict | None:
+    """Verify access token signature/type and denylist state."""
+    payload = verify_token(token, token_type="access")
+    if not payload:
+        return None
+
+    try:
+        if await is_access_token_denylisted(token):
+            return None
+    except RuntimeError:
+        # If Redis is unavailable, fail closed for protected endpoints.
+        return None
+
+    return payload
+
+
+async def _verify_active_refresh_token(token: str) -> dict | None:
+    """Verify refresh token signature/type and denylist state."""
+    payload = verify_token(token, token_type="refresh")
+    if not payload:
+        return None
+
+    try:
+        if await is_refresh_token_denylisted(token):
+            return None
+    except RuntimeError:
+        # If Redis is unavailable, fail closed for refresh operations.
+        return None
+
+    return payload
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -55,7 +102,9 @@ async def register(
 
 
 @router.post("/login", response_model=TokenResponse)
+@limiter.limit(settings.RATE_LIMIT_LOGIN)
 async def login(
+    request: Request,
     credentials: UserLogin,
     db: AsyncSession = Depends(get_db)
 ) -> TokenResponse:
@@ -68,12 +117,14 @@ async def login(
     user = await UserCRUD.get_user_by_email(db, credentials.email)
     
     if not user or not verify_password(credentials.password, user.hashed_password):
+        emit_audit_event(request, action="login", outcome="failure", email=credentials.email)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
         )
     
     if not user.is_active:
+        emit_audit_event(request, action="login", outcome="blocked_inactive", user_id=user.id, email=user.email)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User account is inactive"
@@ -87,6 +138,14 @@ async def login(
         data={"sub": user.id}
     )
     
+    emit_audit_event(
+        request,
+        action="login",
+        outcome="success",
+        user_id=user.id,
+        email=user.email,
+        role=user.role.value,
+    )
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token
@@ -95,6 +154,7 @@ async def login(
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh(
+    request: Request,
     token_data: TokenRefresh,
     db: AsyncSession = Depends(get_db)
 ) -> TokenResponse:
@@ -103,9 +163,10 @@ async def refresh(
     
     - **refresh_token**: Valid refresh token from login
     """
-    payload = verify_token(token_data.refresh_token, token_type="refresh")
+    payload = await _verify_active_refresh_token(token_data.refresh_token)
     
     if not payload:
+        emit_audit_event(request, action="refresh", outcome="failure")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired refresh token"
@@ -113,6 +174,7 @@ async def refresh(
     
     user_id = payload.get("sub")
     if not user_id:
+        emit_audit_event(request, action="refresh", outcome="failure")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid refresh token"
@@ -120,6 +182,7 @@ async def refresh(
     
     user = await UserCRUD.get_user_by_id(db, user_id)
     if not user or not user.is_active:
+        emit_audit_event(request, action="refresh", outcome="failure", user_id=user_id)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found or inactive"
@@ -130,9 +193,26 @@ async def refresh(
         data={"sub": user.id, "email": user.email, "role": user.role.value}
     )
     
-    # Optionally create new refresh token or reuse the old one
-    refresh_token = token_data.refresh_token
+    try:
+        await denylist_refresh_token(token_data.refresh_token)
+    except RuntimeError:
+        emit_audit_event(request, action="refresh", outcome="error", user_id=user.id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Token store unavailable"
+        )
+
+    # Rotate refresh token: old refresh token is revoked, new one is minted.
+    refresh_token = create_refresh_token(data={"sub": user.id})
     
+    emit_audit_event(
+        request,
+        action="refresh",
+        outcome="success",
+        user_id=user.id,
+        email=user.email,
+        role=user.role.value,
+    )
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token
@@ -141,7 +221,7 @@ async def refresh(
 
 @router.get("/me", response_model=UserResponse)
 async def get_current_user(
-    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     db: AsyncSession = Depends(get_db)
 ) -> UserResponse:
     """
@@ -149,17 +229,8 @@ async def get_current_user(
     
     Requires Authorization header with Bearer token.
     """
-    auth_header = request.headers.get("Authorization")
-    
-    if not auth_header or not auth_header.startswith("Bearer "):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or invalid token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    token = auth_header.split(" ")[1]
-    payload = verify_token(token, token_type="access")
+    token = credentials.credentials
+    payload = await _verify_active_access_token(token)
     
     if not payload:
         raise HTTPException(
@@ -169,6 +240,12 @@ async def get_current_user(
         )
     
     user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Malformed authorization code"
+        )
+
     user = await UserCRUD.get_user_by_id(db, user_id)
     
     if not user:
@@ -188,32 +265,45 @@ async def get_current_user(
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout(request: Request) -> None:
+async def logout(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
+) -> None:
     """
     Logout user (invalidate token).
     
     Note: In this implementation, we recommend using Redis as a token denylist
     for more robust logout functionality. This endpoint is a placeholder.
     """
-    auth_header = request.headers.get("Authorization")
-    
-    if not auth_header or not auth_header.startswith("Bearer "):
+    token = credentials.credentials
+    payload = await _verify_active_access_token(token)
+    if not payload:
+        emit_audit_event(request, action="logout", outcome="failure")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or invalid token"
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-    
-    token = auth_header.split(" ")[1]
-    
-    # TODO: Add token to Redis denylist
-    # redis_client.setex(f"blacklist:{token}", settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60, "1")
-    
+
+    await denylist_access_token(token)
+    emit_audit_event(
+        request,
+        action="logout",
+        outcome="success",
+        user_id=payload.get("sub"),
+        email=payload.get("email"),
+        role=payload.get("role"),
+    )
+
     return None
 
 
 @router.post("/verify", response_model=TokenVerifyResponse)
+@limiter.limit(settings.RATE_LIMIT_VERIFY)
 async def verify_token_endpoint(
-    request: TokenVerifyRequest,
+    request: Request,
+    token_request: TokenVerifyRequest,
+    x_service_auth: str | None = Header(default=None, alias="X-Service-Auth"),
     db: AsyncSession = Depends(get_db)
 ) -> TokenVerifyResponse:
     """
@@ -224,20 +314,294 @@ async def verify_token_endpoint(
     
     Returns token validity and user information if valid.
     """
-    payload = verify_token(request.token, token_type="access")
+    if x_service_auth != settings.INTERNAL_SERVICE_KEY:
+        emit_audit_event(request, action="verify", outcome="forbidden")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid service credentials",
+        )
+
+    payload = await _verify_active_access_token(token_request.token)
     
     if not payload:
+        emit_audit_event(request, action="verify", outcome="invalid_token")
         return TokenVerifyResponse(valid=False)
     
     user_id = payload.get("sub")
     user = await UserCRUD.get_user_by_id(db, user_id)
     
     if not user or not user.is_active:
+        emit_audit_event(request, action="verify", outcome="invalid_user", user_id=user_id)
         return TokenVerifyResponse(valid=False)
     
+    emit_audit_event(
+        request,
+        action="verify",
+        outcome="success",
+        user_id=user.id,
+        email=user.email,
+        role=user.role.value,
+    )
     return TokenVerifyResponse(
         valid=True,
         user_id=user.id,
         role=user.role.value,
         email=user.email
     )
+
+
+@router.post("/forgot-password", response_model=MessageResponse)
+@limiter.limit(settings.RATE_LIMIT_FORGOT_PASSWORD)
+async def forgot_password(
+    request: Request,
+    forgot_request: ForgotPasswordRequest,
+    db: AsyncSession = Depends(get_db)
+) -> MessageResponse:
+    """
+    Request a password reset token.
+
+    For security reasons this endpoint always returns the same message,
+    even when the email does not exist.
+    """
+    user = await UserCRUD.get_user_by_email(db, forgot_request.email)
+
+    if user and user.is_active:
+        reset_token = create_password_reset_token(user.email, user.id)
+        await send_password_reset_email(user.email, reset_token)
+        emit_audit_event(
+            request,
+            action="password_reset_requested",
+            outcome="success",
+            user_id=user.id,
+            email=user.email,
+            role=user.role.value,
+        )
+    else:
+        emit_audit_event(request, action="password_reset_requested", outcome="accepted")
+
+    return MessageResponse(
+        message="If the account exists, a password reset link was sent"
+    )
+
+
+@router.post("/reset-password", response_model=MessageResponse)
+@limiter.limit(settings.RATE_LIMIT_RESET_PASSWORD)
+async def reset_password(
+    request: Request,
+    reset_request: ResetPasswordRequest,
+    db: AsyncSession = Depends(get_db)
+) -> MessageResponse:
+    """Reset password using a valid password_reset token."""
+    payload = verify_token(reset_request.token, token_type="password_reset")
+
+    if not payload:
+        emit_audit_event(request, action="password_reset", outcome="failure")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired reset token"
+        )
+
+    user_id = payload.get("sub")
+    if not user_id:
+        emit_audit_event(request, action="password_reset", outcome="failure")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid reset token"
+        )
+
+    user = await UserCRUD.get_user_by_id(db, user_id)
+    if not user or not user.is_active:
+        emit_audit_event(request, action="password_reset", outcome="failure", user_id=user_id)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found or inactive"
+        )
+
+    await UserCRUD.update_password(db, user.id, hash_password(reset_request.new_password))
+    emit_audit_event(
+        request,
+        action="password_reset",
+        outcome="success",
+        user_id=user.id,
+        email=user.email,
+        role=user.role.value,
+    )
+
+    return MessageResponse(message="Password updated successfully")
+
+
+@router.delete("/me", response_model=MessageResponse)
+async def delete_my_account(
+    request: Request,
+    body: DeleteAccountRequest,
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    db: AsyncSession = Depends(get_db)
+) -> MessageResponse:
+    """Delete current authenticated user account permanently."""
+    token = credentials.credentials
+    payload = await _verify_active_access_token(token)
+
+    if not payload:
+        emit_audit_event(request, action="delete_account", outcome="failure")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user_id = payload.get("sub")
+    user = await UserCRUD.get_user_by_id(db, user_id)
+
+    if not user:
+        emit_audit_event(request, action="delete_account", outcome="failure", user_id=user_id)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    if not verify_password(body.password, user.hashed_password):
+        emit_audit_event(request, action="delete_account", outcome="failure", user_id=user.id, email=user.email)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid password"
+        )
+
+    await denylist_access_token(token)
+    await UserCRUD.delete_user(db, user.id)
+    emit_audit_event(
+        request,
+        action="delete_account",
+        outcome="success",
+        user_id=user.id,
+        email=user.email,
+        role=user.role.value,
+    )
+    return MessageResponse(message="Account deleted successfully")
+
+
+@router.post("/exchange-code", response_model=TokenResponse)
+@limiter.limit(settings.RATE_LIMIT_EXCHANGE_CODE)
+async def exchange_authorization_code(
+    request: Request,
+    exchange_request: AuthCodeExchangeRequest,
+    db: AsyncSession = Depends(get_db)
+) -> TokenResponse:
+    """Exchange a short-lived auth code for access and refresh tokens."""
+    payload = verify_token(exchange_request.code, token_type="auth_code")
+
+    if not payload:
+        emit_audit_event(
+            request,
+            action="exchange_code",
+            outcome="failure",
+            client_id=exchange_request.client_id,
+            details={"client_id": exchange_request.client_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired authorization code"
+        )
+
+    code_client_id = payload.get("client_id")
+    if code_client_id != exchange_request.client_id:
+        emit_audit_event(
+            request,
+            action="exchange_code",
+            outcome="failure",
+            client_id=exchange_request.client_id,
+            details={"client_id": exchange_request.client_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization code client mismatch"
+        )
+
+    jti = payload.get("jti")
+    if not jti:
+        emit_audit_event(
+            request,
+            action="exchange_code",
+            outcome="failure",
+            client_id=exchange_request.client_id,
+            details={"client_id": exchange_request.client_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Malformed authorization code"
+        )
+
+    try:
+        redis_client = get_redis()
+    except RuntimeError:
+        emit_audit_event(
+            request,
+            action="exchange_code",
+            outcome="error",
+            client_id=exchange_request.client_id,
+            details={"client_id": exchange_request.client_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authorization code store unavailable"
+        )
+
+    stored_client_id = await redis_client.getdel(f"auth_code:{jti}")
+    if not stored_client_id or stored_client_id != exchange_request.client_id:
+        emit_audit_event(
+            request,
+            action="exchange_code",
+            outcome="failure",
+            client_id=exchange_request.client_id,
+            details={"client_id": exchange_request.client_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization code already used or invalid"
+        )
+
+    user_id = payload.get("sub")
+    user = await UserCRUD.get_user_by_id(db, user_id)
+    if not user or not user.is_active:
+        emit_audit_event(
+            request,
+            action="exchange_code",
+            outcome="failure",
+            user_id=user_id,
+            client_id=exchange_request.client_id,
+            details={"client_id": exchange_request.client_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive"
+        )
+
+    access_token = create_access_token(
+        data={"sub": user.id, "email": user.email, "role": user.role.value}
+    )
+    refresh_token = create_refresh_token(data={"sub": user.id})
+
+    emit_audit_event(
+        request,
+        action="exchange_code",
+        outcome="success",
+        user_id=user.id,
+        email=user.email,
+        role=user.role.value,
+        client_id=exchange_request.client_id,
+        details={"client_id": exchange_request.client_id},
+    )
+    return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+
+
+@router.post("/dev/test-email", response_model=MessageResponse)
+async def dev_test_email(request: DevEmailTestRequest) -> MessageResponse:
+    """Send a development test email to verify SMTP setup."""
+    # Keep this endpoint strictly dev-only and opt-in.
+    if settings.ENVIRONMENT.lower() != "development" or not settings.DEV_EMAIL_TEST_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Endpoint not available"
+        )
+
+    await send_dev_test_email(request.email)
+    return MessageResponse(message="Test email dispatched")

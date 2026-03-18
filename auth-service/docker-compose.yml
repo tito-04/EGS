@@ -1,3 +1,4 @@
+
 services:
   postgres:
     image: postgres:15-alpine
@@ -10,10 +11,12 @@ services:
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user"]
+      test: ["CMD-SHELL", "pg_isready -U user -d auth_db"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - auth-network
 
   redis:
     image: redis:7-alpine
@@ -26,9 +29,20 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - auth-network
+
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    networks:
+      - auth-network
 
   auth-service:
     build: .
+    working_dir: /app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
@@ -36,14 +50,27 @@ services:
       DATABASE_URL: postgresql://user:password@postgres:5432/auth_db
       REDIS_URL: redis://redis:6379/0
       DEBUG: "False"
+      EMAIL_ENABLED: "True"
+      EMAIL_HOST: mailpit
+      EMAIL_PORT: "1025"
+      EMAIL_FROM: noreply@egs.local
+      DEV_EMAIL_TEST_ENABLED: "False"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      mailpit:
+        condition: service_started
     volumes:
       - .:/app
+    networks:
+      - auth-network
 
 volumes:
   postgres_data:
   redis_data:
+
+networks:
+  auth-network:
+    driver: bridge

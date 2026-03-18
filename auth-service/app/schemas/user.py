@@ -96,3 +96,40 @@ class TokenVerifyResponse(BaseModel):
     user_id: Optional[str] = None
     role: Optional[str] = None
     email: Optional[str] = None
+
+
+class ForgotPasswordRequest(BaseModel):
+    """Schema for forgot-password request."""
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    """Schema for reset-password request."""
+    token: str
+    new_password: str = Field(
+        ...,
+        min_length=8,
+        max_length=72,
+        description="Password must be 8-72 characters (bcrypt limitation)",
+    )
+
+
+class DeleteAccountRequest(BaseModel):
+    """Schema for account deletion confirmation."""
+    password: str
+
+
+class MessageResponse(BaseModel):
+    """Generic message response."""
+    message: str
+
+
+class AuthCodeExchangeRequest(BaseModel):
+    """Schema for authorization code exchange request."""
+    code: str
+    client_id: str
+
+
+class DevEmailTestRequest(BaseModel):
+    """Schema for development SMTP test endpoint."""
+    email: EmailStr
