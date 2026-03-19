@@ -10,7 +10,7 @@
   <main class="auth-shell">
     <section class="auth-card">
       <h1>Sign in to EGS</h1>
-      <p class="subtitle">Use your central account to continue.</p>
+      <p class="subtitle">Use your account to continue to the requested service.</p>
       
       <p id="error-message" class="error" style="display: none;"></p>
       <p id="success-message" class="success" style="display: none;"></p>
@@ -35,6 +35,14 @@
   </main>
   <script>
     const API_URL = "http://localhost:8000/api/v1";
+    const urlParams = new URLSearchParams(window.location.search);
+    const handoffUrl = urlParams.get("handoff_url");
+    const returnTo = urlParams.get("return_to");
+    const handoffState = urlParams.get("state");
+
+    function withCurrentQuery(path) {
+      return window.location.search ? `${path}${window.location.search}` : path;
+    }
 
     function extractErrorMessage(payload, fallback) {
       if (!payload) {
@@ -54,6 +62,41 @@
       }
       return fallback;
     }
+
+    async function createBrowserHandoff(tokens) {
+      if (!handoffUrl || !returnTo || !handoffState) {
+        return null;
+      }
+
+      const response = await fetch(handoffUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          access_token: tokens.access_token,
+          refresh_token: tokens.refresh_token,
+          return_to: returnTo,
+          state: handoffState
+        })
+      });
+
+      let data = null;
+      try {
+        data = await response.json();
+      } catch (_) {
+        data = null;
+      }
+
+      if (!response.ok || !data?.redirect_to) {
+        throw new Error(extractErrorMessage(data, "Could not return to the requested service."));
+      }
+
+      return data.redirect_to;
+    }
+
+    document.getElementById("forgot-link").href = withCurrentQuery("forgot_password.html");
+    document.getElementById("register-link").href = withCurrentQuery("register.html");
 
     document.getElementById("login-form").addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -94,13 +137,16 @@
 
         // Save token to localStorage
         localStorage.setItem("access_token", data.access_token);
-        successMsg.textContent = "Login successful!";
+        const redirectTo = await createBrowserHandoff(data);
+        successMsg.textContent = redirectTo ? "Login successful! Returning to your service..." : "Login successful!";
         successMsg.style.display = "block";
         
-        // Redirect or behave based on UI needs
         setTimeout(() => {
+          if (redirectTo) {
+            window.location.href = redirectTo;
+            return;
+          }
           alert("Logged in! Token stored in localStorage.");
-          // window.location.href = "dashboard.html"; // Redirect as needed
         }, 1000);
 
       } catch (err) {

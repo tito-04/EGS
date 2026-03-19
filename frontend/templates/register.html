@@ -10,7 +10,7 @@
   <main class="auth-shell">
     <section class="auth-card">
       <h1>Create your EGS account</h1>
-      <p class="subtitle">One account to access Flash Sale and Payment.</p>
+      <p class="subtitle">Create your account and continue to the service that sent you here.</p>
       
       <p id="error-message" class="error" style="display: none;"></p>
       <p id="success-message" class="success" style="display: none;"></p>
@@ -36,6 +36,10 @@
   <script>
     const API_URL = "http://localhost:8000/api/v1";
 
+    function withCurrentQuery(path) {
+      return window.location.search ? `${path}${window.location.search}` : path;
+    }
+
     function extractErrorMessage(payload, fallback) {
       if (!payload) {
         return fallback;
@@ -57,6 +61,8 @@
       }
       return fallback;
     }
+
+    document.getElementById("login-link").href = withCurrentQuery("login.html");
 
     document.getElementById("register-form").addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -102,7 +108,7 @@
         successMsg.style.display = "block";
 
         setTimeout(() => {
-          window.location.href = "login.html";
+          window.location.href = withCurrentQuery("login.html");
         }, 2000);
 
       } catch (err) {
