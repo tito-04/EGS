@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EGS Auth - Login</title>
+  <link rel="stylesheet" href="../static/css/auth.css">
+</head>
+<body>
+  <main class="auth-shell">
+    <section class="auth-card">
+      <h1>Sign in to EGS</h1>
+      <p class="subtitle">Use your central account to continue.</p>
+      
+      <p id="error-message" class="error" style="display: none;"></p>
+      <p id="success-message" class="success" style="display: none;"></p>
+      
+      <form id="login-form">
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" required>
+
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" required minlength="8">
+
+        <button type="submit">Sign In</button>
+      </form>
+      <p class="small-link">
+        <a href="forgot_password.html" id="forgot-link">Forgot your password?</a>
+      </p>
+      <p class="small-link">
+        New here?
+        <a href="register.html" id="register-link">Create account</a>
+      </p>
+    </section>
+  </main>
+  <script>
+    const API_URL = "http://localhost:8000/api/v1";
+
+    function extractErrorMessage(payload, fallback) {
+      if (!payload) {
+        return fallback;
+      }
+      if (typeof payload.detail === "string") {
+        return payload.detail;
+      }
+      if (Array.isArray(payload.detail)) {
+        const first = payload.detail[0];
+        if (typeof first === "string") {
+          return first;
+        }
+        if (first && first.msg) {
+          return first.msg;
+        }
+      }
+      return fallback;
+    }
+
+    document.getElementById("login-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      
+      const email = document.getElementById("email").value;
+      const password = document.getElementById("password").value;
+      const errorMsg = document.getElementById("error-message");
+      const successMsg = document.getElementById("success-message");
+      const btn = e.target.querySelector("button");
+      
+      errorMsg.style.display = "none";
+      successMsg.style.display = "none";
+      btn.disabled = true;
+      btn.textContent = "Signing In...";
+
+      try {
+        const response = await fetch(`${API_URL}/auth/login`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            email,
+            password
+          })
+        });
+
+        let data = null;
+        try {
+          data = await response.json();
+        } catch (_) {
+          data = null;
+        }
+
+        if (!response.ok) {
+          throw new Error(extractErrorMessage(data, "Invalid login credentials."));
+        }
+
+        // Save token to localStorage
+        localStorage.setItem("access_token", data.access_token);
+        successMsg.textContent = "Login successful!";
+        successMsg.style.display = "block";
+        
+        // Redirect or behave based on UI needs
+        setTimeout(() => {
+          alert("Logged in! Token stored in localStorage.");
+          // window.location.href = "dashboard.html"; // Redirect as needed
+        }, 1000);
+
+      } catch (err) {
+        errorMsg.textContent = err.message;
+        errorMsg.style.display = "block";
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Sign In";
+      }
+    });
+  </script>
+</body>
+</html>

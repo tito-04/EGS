@@ -2,10 +2,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
-from app.core.email import send_password_reset_email, send_dev_test_email
+from app.core.email import send_password_reset_email
 from app.core.observability import emit_audit_event
 from app.core.rate_limit import limiter
-from app.core.redis_client import get_redis
 from app.core.token_denylist import (
     denylist_access_token,
     denylist_refresh_token,
@@ -17,8 +16,7 @@ from app.schemas.user import (
     UserCreate, UserLogin, UserResponse, TokenResponse,
     TokenRefresh, TokenVerifyRequest, TokenVerifyResponse,
     ForgotPasswordRequest, ResetPasswordRequest,
-    DeleteAccountRequest, MessageResponse, AuthCodeExchangeRequest,
-    DevEmailTestRequest,
+    DeleteAccountRequest, MessageResponse,
 )
 from app.crud import UserCRUD
 from app.core.security import (
@@ -367,11 +365,11 @@ async def forgot_password(
 
     if user and user.is_active:
         reset_token = create_password_reset_token(user.email, user.id)
-        await send_password_reset_email(user.email, reset_token)
+        delivered = await send_password_reset_email(user.email, reset_token)
         emit_audit_event(
             request,
             action="password_reset_requested",
-            outcome="success",
+            outcome="success" if delivered else "email_delivery_failed",
             user_id=user.id,
             email=user.email,
             role=user.role.value,
@@ -479,129 +477,3 @@ async def delete_my_account(
     return MessageResponse(message="Account deleted successfully")
 
 
-@router.post("/exchange-code", response_model=TokenResponse)
-@limiter.limit(settings.RATE_LIMIT_EXCHANGE_CODE)
-async def exchange_authorization_code(
-    request: Request,
-    exchange_request: AuthCodeExchangeRequest,
-    db: AsyncSession = Depends(get_db)
-) -> TokenResponse:
-    """Exchange a short-lived auth code for access and refresh tokens."""
-    payload = verify_token(exchange_request.code, token_type="auth_code")
-
-    if not payload:
-        emit_audit_event(
-            request,
-            action="exchange_code",
-            outcome="failure",
-            client_id=exchange_request.client_id,
-            details={"client_id": exchange_request.client_id},
-        )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired authorization code"
-        )
-
-    code_client_id = payload.get("client_id")
-    if code_client_id != exchange_request.client_id:
-        emit_audit_event(
-            request,
-            action="exchange_code",
-            outcome="failure",
-            client_id=exchange_request.client_id,
-            details={"client_id": exchange_request.client_id},
-        )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authorization code client mismatch"
-        )
-
-    jti = payload.get("jti")
-    if not jti:
-        emit_audit_event(
-            request,
-            action="exchange_code",
-            outcome="failure",
-            client_id=exchange_request.client_id,
-            details={"client_id": exchange_request.client_id},
-        )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Malformed authorization code"
-        )
-
-    try:
-        redis_client = get_redis()
-    except RuntimeError:
-        emit_audit_event(
-            request,
-            action="exchange_code",
-            outcome="error",
-            client_id=exchange_request.client_id,
-            details={"client_id": exchange_request.client_id},
-        )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Authorization code store unavailable"
-        )
-
-    stored_client_id = await redis_client.getdel(f"auth_code:{jti}")
-    if not stored_client_id or stored_client_id != exchange_request.client_id:
-        emit_audit_event(
-            request,
-            action="exchange_code",
-            outcome="failure",
-            client_id=exchange_request.client_id,
-            details={"client_id": exchange_request.client_id},
-        )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authorization code already used or invalid"
-        )
-
-    user_id = payload.get("sub")
-    user = await UserCRUD.get_user_by_id(db, user_id)
-    if not user or not user.is_active:
-        emit_audit_event(
-            request,
-            action="exchange_code",
-            outcome="failure",
-            user_id=user_id,
-            client_id=exchange_request.client_id,
-            details={"client_id": exchange_request.client_id},
-        )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found or inactive"
-        )
-
-    access_token = create_access_token(
-        data={"sub": user.id, "email": user.email, "role": user.role.value}
-    )
-    refresh_token = create_refresh_token(data={"sub": user.id})
-
-    emit_audit_event(
-        request,
-        action="exchange_code",
-        outcome="success",
-        user_id=user.id,
-        email=user.email,
-        role=user.role.value,
-        client_id=exchange_request.client_id,
-        details={"client_id": exchange_request.client_id},
-    )
-    return TokenResponse(access_token=access_token, refresh_token=refresh_token)
-
-
-@router.post("/dev/test-email", response_model=MessageResponse)
-async def dev_test_email(request: DevEmailTestRequest) -> MessageResponse:
-    """Send a development test email to verify SMTP setup."""
-    # Keep this endpoint strictly dev-only and opt-in.
-    if settings.ENVIRONMENT.lower() != "development" or not settings.DEV_EMAIL_TEST_ENABLED:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Endpoint not available"
-        )
-
-    await send_dev_test_email(request.email)
-    return MessageResponse(message="Test email dispatched")

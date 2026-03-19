@@ -107,6 +107,30 @@ python -m app.main
 
 ✅ Serviço rodando em: http://localhost:8000
 
+## 🔗 Frontend Separado (UI estática)
+
+Este projeto está em modo API-only. A UI de autenticação está na pasta `../frontend` e comunica com a API via Fetch/AJAX.
+
+Para servir a UI localmente:
+
+```bash
+cd ../frontend
+python3 -m http.server 5500
+```
+
+Abrir no browser:
+
+- http://127.0.0.1:5500/templates/login.html
+- http://127.0.0.1:5500/templates/forgot_password.html
+
+No `.env` do auth-service, confirmar:
+
+```env
+BACKEND_CORS_ORIGINS=http://localhost:5500,http://127.0.0.1:5500
+SERVICE_PUBLIC_BASE_URL=http://localhost:5500
+PASSWORD_RESET_LINK_PATH=/templates/reset_password.html
+```
+
 ---
 
 ## 📚 Acessar a Documentação
@@ -119,16 +143,16 @@ Abra no teu browser:
 
 ---
 
-## ✅ Teste Rápido do Fluxo Web Completo
+## ✅ Teste Rápido do Fluxo API Completo
 
-Para validar o fluxo completo (UI + exchange-code + verify + refresh rotation + logout + forgot/reset via Mailpit):
+Para validar o fluxo completo da API (register + login + verify + refresh rotation + logout + forgot/reset guards):
 
 ```bash
 docker compose up -d
 make test-web-flow
 ```
 
-Se o comando terminar com `ALL WEB FLOW CHECKS PASSED`, o serviço está pronto para demonstração e integração.
+Se o comando terminar com `ALL API FLOW CHECKS PASSED`, o serviço está pronto para integração.
 
 ---
 
@@ -230,6 +254,13 @@ curl -X POST "http://localhost:8000/api/v1/auth/verify" \
   "email": "andre@example.com"
 }
 ```
+
+Notas importantes para integração com outros serviços:
+
+- Endpoint obrigatório para validação interna: `POST /api/v1/auth/verify`.
+- Header obrigatório: `X-Service-Auth` com `INTERNAL_SERVICE_KEY` partilhada.
+- Se o serviço cliente receber `valid=false`, deve negar acesso e pedir novo login.
+- Não assumir token válido só por assinatura JWT: logout/revogação é controlado pelo Auth Service (denylist).
 
 ---
 

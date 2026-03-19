@@ -1,7 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from app.core.config import settings
@@ -15,7 +14,6 @@ from app.core.rate_limit import limiter
 from app.core.redis_client import init_redis, close_redis
 from app.db import init_db
 from app.api.v1 import auth
-from app.api.ui import router as ui_router
 
 
 # Create FastAPI app
@@ -46,13 +44,11 @@ async def request_context_middleware(request, call_next):
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.allowed_redirect_origins,
+    allow_origins=settings.backend_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
 # Event handlers
@@ -89,7 +85,6 @@ async def health_check():
 
 # Include routers
 app.include_router(auth.router, prefix=settings.API_V1_STR)
-app.include_router(ui_router)
 
 
 # Root endpoint
@@ -100,8 +95,7 @@ async def root():
         "message": "🔐 Auth Service v1.0.0",
         "docs": "/docs",
         "health": "/health",
-        "api": "/api/v1",
-        "login": "/ui/login?client_id=flash-sale&redirect_uri=http://localhost:3000/callback"
+        "api": "/api/v1"
     }
 
 

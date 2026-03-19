@@ -16,23 +16,21 @@ def test_production_rejects_placeholder_secret_key() -> None:
         assert "SECRET_KEY" in str(exc)
 
 
-def test_production_rejects_insecure_cookie() -> None:
+def test_production_rejects_non_https_public_url() -> None:
     settings = Settings(
         _env_file=None,
         ENVIRONMENT="production",
         SECRET_KEY="A" * 64,
         INTERNAL_SERVICE_KEY="B" * 32,
-        SSO_COOKIE_SECURE=False,
-        SERVICE_PUBLIC_BASE_URL="https://auth.example.com",
-        ALLOWED_REDIRECT_ORIGINS="https://flashsale.example.com",
-        AUTH_CLIENTS_JSON='{"flash-sale": ["https://flashsale.example.com/callback"]}',
+        SERVICE_PUBLIC_BASE_URL="http://auth.example.com",
+        BACKEND_CORS_ORIGINS="https://flashsale.example.com",
     )
 
     try:
         settings.validate_security_configuration()
-        assert False, "Expected production validation to fail for insecure cookie"
+        assert False, "Expected production validation to fail for non-HTTPS public URL"
     except ValueError as exc:
-        assert "SSO_COOKIE_SECURE" in str(exc)
+        assert "SERVICE_PUBLIC_BASE_URL" in str(exc)
 
 
 def test_production_rejects_non_https_redirect_origin() -> None:
@@ -41,17 +39,15 @@ def test_production_rejects_non_https_redirect_origin() -> None:
         ENVIRONMENT="production",
         SECRET_KEY="A" * 64,
         INTERNAL_SERVICE_KEY="B" * 32,
-        SSO_COOKIE_SECURE=True,
         SERVICE_PUBLIC_BASE_URL="https://auth.example.com",
-        ALLOWED_REDIRECT_ORIGINS="http://flashsale.example.com",
-        AUTH_CLIENTS_JSON='{"flash-sale": ["https://flashsale.example.com/callback"]}',
+        BACKEND_CORS_ORIGINS="http://flashsale.example.com",
     )
 
     try:
         settings.validate_security_configuration()
         assert False, "Expected production validation to fail for non-HTTPS redirect origin"
     except ValueError as exc:
-        assert "ALLOWED_REDIRECT_ORIGINS" in str(exc)
+        assert "BACKEND_CORS_ORIGINS" in str(exc)
 
 
 def test_production_valid_configuration_passes() -> None:
@@ -60,10 +56,8 @@ def test_production_valid_configuration_passes() -> None:
         ENVIRONMENT="production",
         SECRET_KEY="A" * 64,
         INTERNAL_SERVICE_KEY="B" * 32,
-        SSO_COOKIE_SECURE=True,
         SERVICE_PUBLIC_BASE_URL="https://auth.example.com",
-        ALLOWED_REDIRECT_ORIGINS="https://flashsale.example.com,https://payment.example.com",
-        AUTH_CLIENTS_JSON='{"flash-sale": ["https://flashsale.example.com/callback"], "payment": ["https://payment.example.com/callback"]}',
+        BACKEND_CORS_ORIGINS="https://flashsale.example.com,https://payment.example.com",
     )
 
     settings.validate_security_configuration()

@@ -40,13 +40,13 @@ def _send_email_sync(to_email: str, subject: str, body: str) -> None:
         smtp.send_message(msg)
 
 
-async def send_password_reset_email(to_email: str, token: str) -> None:
-    """Send password reset email, with safe fallback when email is disabled."""
+async def send_password_reset_email(to_email: str, token: str) -> bool:
+    """Send password reset email. Returns True when the email is delivered."""
     reset_link = build_password_reset_link(token)
 
     if not settings.EMAIL_ENABLED:
         logger.info("[PASSWORD_RESET_DEV] email=%s link=%s", to_email, reset_link)
-        return
+        return False
 
     subject = "EGS Password Reset"
     body = (
@@ -57,23 +57,7 @@ async def send_password_reset_email(to_email: str, token: str) -> None:
 
     try:
         _send_email_sync(to_email, subject, body)
+        return True
     except Exception:
         logger.exception("Failed to send password reset email to %s", to_email)
-
-
-async def send_dev_test_email(to_email: str) -> None:
-    """Send a simple test email to validate SMTP wiring in dev."""
-    subject = "EGS SMTP Test Email"
-    body = (
-        "This is a development test email from EGS Auth Service.\n\n"
-        "If you received this in your Mailpit/MailHog inbox, SMTP wiring is working."
-    )
-
-    if not settings.EMAIL_ENABLED:
-        logger.info("[EMAIL_TEST_DEV] email=%s subject=%s", to_email, subject)
-        return
-
-    try:
-        _send_email_sync(to_email, subject, body)
-    except Exception:
-        logger.exception("Failed to send dev test email to %s", to_email)
+        return False

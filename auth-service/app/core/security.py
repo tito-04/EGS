@@ -64,16 +64,6 @@ def create_password_reset_token(email: str, user_id: str) -> str:
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
-def create_authorization_code(data: Dict[str, Any]) -> str:
-    """Create a short-lived authorization code used in redirect flows."""
-    to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + timedelta(
-        seconds=settings.AUTH_CODE_EXPIRE_SECONDS
-    )
-    to_encode.update({"exp": expire, "type": "auth_code", "jti": to_encode.get("jti", str(uuid4()))})
-    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
-
-
 def decode_token(token: str) -> Optional[Dict[str, Any]]:
     """Decode a JWT token."""
     try:

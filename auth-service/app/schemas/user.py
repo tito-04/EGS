@@ -122,14 +122,3 @@ class DeleteAccountRequest(BaseModel):
 class MessageResponse(BaseModel):
     """Generic message response."""
     message: str
-
-
-class AuthCodeExchangeRequest(BaseModel):
-    """Schema for authorization code exchange request."""
-    code: str
-    client_id: str
-
-
-class DevEmailTestRequest(BaseModel):
-    """Schema for development SMTP test endpoint."""
-    email: EmailStr

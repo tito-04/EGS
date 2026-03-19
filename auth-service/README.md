@@ -491,16 +491,21 @@ pip install httpx
 docker compose up -d
 ```
 
-2. Configurar clientes e chave de serviço no `.env` do Auth Service:
+2. Configurar chave interna e CORS no `.env` do Auth Service:
 
 ```env
 INTERNAL_SERVICE_KEY=<internal-service-key>
-ALLOWED_REDIRECT_ORIGINS=https://flashsale.example.com,https://payment.example.com
-AUTH_CLIENTS_JSON={"flash-sale": ["https://flashsale.example.com/callback"], "payment": ["https://payment.example.com/callback"]}
-DEV_EMAIL_TEST_ENABLED=False
+BACKEND_CORS_ORIGINS=https://flashsale.example.com,https://payment.example.com
+EMAIL_ENABLED=True
+EMAIL_HOST=smtp.gmail.com
+EMAIL_PORT=587
+EMAIL_USE_TLS=True
+EMAIL_USERNAME=<smtp-username>
+EMAIL_PASSWORD=<smtp-password>
+EMAIL_FROM=<noreply@your-domain>
+SERVICE_PUBLIC_BASE_URL=https://auth-ui.example.com
+PASSWORD_RESET_LINK_PATH=/templates/reset_password.html
 ```
-
-`/api/v1/auth/dev/test-email` deve permanecer desativado em ambientes partilhados/integration.
 
 3. Testar contrato de verificação de token:
 
@@ -511,72 +516,30 @@ curl -X POST http://localhost:8000/api/v1/auth/verify \
   -d '{"token":"<jwt>"}'
 ```
 
-4. Testar SMTP em ambiente de desenvolvimento:
-
-```bash
-python scripts/test_smtp_email.py --base-url http://localhost:8000 --email dev-inbox@example.com
-```
-
-5. Validar regressão de segurança antes de integrar:
+4. Validar regressão de segurança antes de integrar:
 
 ```bash
 make test-security
 ```
 
-6. Validar fluxo web completo (UI + code exchange + reset password + logout):
+5. Validar fluxo API completo (register + login + verify + refresh + logout + reset guards):
 
 ```bash
 make test-web-flow
 ```
 
-### 1) Redirect de login (Flash Sale / Payment)
+### Checklist para o compositor (integração com outros serviços)
 
-Redireciona o utilizador para o IdP com estes parâmetros obrigatórios:
+- O Auth Service é API-only; a UI estática corre separadamente em `frontend/`.
+- Todos os serviços que validam token devem chamar `POST /api/v1/auth/verify` com `X-Service-Auth`.
+- Não usar validação local de JWT como única fonte de verdade: tokens revogados ficam na denylist do Auth.
+- Propagar `X-Request-ID` e `X-Correlation-ID` entre serviços para troubleshooting.
+- Configurar `BACKEND_CORS_ORIGINS` apenas com domínios reais dos frontends.
+- Garantir `INTERNAL_SERVICE_KEY` igual entre Auth e consumidores de `/verify`.
+- Confirmar SMTP funcional em ambiente alvo (`EMAIL_ENABLED=True` + credenciais válidas).
+- Nunca comitar `.env`; usar secret manager/variáveis de ambiente no deploy.
 
-```text
-GET /ui/login?client_id=<client_id>&redirect_uri=<redirect_uri>&state=<state>
-```
-
-- `client_id`: cliente registado em `AUTH_CLIENTS_JSON`
-- `redirect_uri`: URL permitida para esse `client_id`
-- `state`: valor opaco para anti-CSRF no cliente (opcional, recomendado)
-
-No sucesso, o Auth Service redireciona para:
-
-```text
-<redirect_uri>?code=<authorization_code>&state=<state>
-```
-
-### 2) Troca de código por tokens
-
-Endpoint:
-
-```http
-POST /api/v1/auth/exchange-code
-Content-Type: application/json
-
-{
-  "code": "<authorization_code>",
-  "client_id": "flash-sale"
-}
-```
-
-Resposta de sucesso (200):
-
-```json
-{
-  "access_token": "<jwt>",
-  "refresh_token": "<jwt>",
-  "token_type": "bearer"
-}
-```
-
-Erros típicos:
-
-- `401`: código inválido/expirado/reutilizado ou `client_id` incompatível
-- `503`: indisponibilidade temporária do storage de códigos
-
-### 3) Contrato de /verify (service-to-service)
+### 1) Contrato de /verify (service-to-service)
 
 `/verify` requer o header `X-Service-Auth` com a chave interna do serviço.
 
@@ -601,7 +564,7 @@ Comportamento esperado:
 - `200` com `{ "valid": false }` quando token é inválido/revogado/expirado
 - `200` com `{ "valid": true, ... }` quando token é válido
 
-### 4) Observabilidade e auditoria
+### 2) Observabilidade e auditoria
 
 Todos os pedidos recebem os headers:
 
@@ -615,7 +578,7 @@ Eventos de auditoria de autenticação são emitidos em JSON (logger `auth.audit
 - `event_type` (`auth_audit`)
 - `request_id`
 - `correlation_id`
-- `action` (ex: `login`, `refresh`, `exchange_code`, `ui_login`)
+- `action` (ex: `login`, `refresh`, `verify`, `password_reset`)
 - `outcome` (ex: `success`, `failure`, `forbidden`)
 - `path`
 - `client_ip`
