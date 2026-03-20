@@ -39,6 +39,7 @@
     const handoffUrl = urlParams.get("handoff_url");
     const returnTo = urlParams.get("return_to");
     const handoffState = urlParams.get("state");
+    const fallbackRedirect = returnTo || "/";
 
     function withCurrentQuery(path) {
       return window.location.search ? `${path}${window.location.search}` : path;
@@ -146,7 +147,7 @@
             window.location.href = redirectTo;
             return;
           }
-          alert("Logged in! Token stored in localStorage.");
+          window.location.href = fallbackRedirect;
         }, 1000);
 
       } catch (err) {
