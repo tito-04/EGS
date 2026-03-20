@@ -12,6 +12,11 @@ class UserCRUD:
     @staticmethod
     async def create_user(db: AsyncSession, user_create: UserCreate) -> User:
         """Create a new user."""
+        normalized_email = user_create.email.strip().lower()
+
+        if user_create.role == SchemaRoleEnum.PROMOTER and not normalized_email.endswith("@prom.pt"):
+            raise ValueError("Promoter accounts must use an email ending with @prom.pt")
+
         # Convert schema role to model role
         role_map = {
             SchemaRoleEnum.FAN: RoleEnum.FAN,
@@ -20,7 +25,7 @@ class UserCRUD:
         }
         
         db_user = User(
-            email=user_create.email,
+            email=normalized_email,
             full_name=user_create.full_name,
             hashed_password=hash_password(user_create.password),
             role=role_map.get(user_create.role, RoleEnum.FAN),

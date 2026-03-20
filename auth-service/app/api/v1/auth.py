@@ -17,8 +17,10 @@ from app.schemas.user import (
     TokenRefresh, TokenVerifyRequest, TokenVerifyResponse,
     ForgotPasswordRequest, ResetPasswordRequest,
     DeleteAccountRequest, MessageResponse,
+    RoleEnum as SchemaRoleEnum,
 )
 from app.crud import UserCRUD
+from app.models import RoleEnum as ModelRoleEnum
 from app.core.security import (
     verify_password, create_access_token, create_refresh_token,
     verify_token, create_password_reset_token, hash_password,
@@ -74,8 +76,19 @@ async def register(
     - **full_name**: User's full name
     - **role**: User role (fan or promoter), defaults to fan
     """
+    normalized_email = user_data.email.strip().lower()
+    requested_role = user_data.role
+    if normalized_email.endswith("@prom.pt") and requested_role == SchemaRoleEnum.FAN:
+        requested_role = SchemaRoleEnum.PROMOTER
+
+    if requested_role.value == "promoter" and not normalized_email.endswith("@prom.pt"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Promoter accounts must use an email ending with @prom.pt",
+        )
+
     # Check if user already exists
-    existing_user = await UserCRUD.get_user_by_email(db, user_data.email)
+    existing_user = await UserCRUD.get_user_by_email(db, normalized_email)
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -83,7 +96,11 @@ async def register(
         )
     
     try:
-        user = await UserCRUD.create_user(db, user_data)
+        payload = user_data.copy(update={
+            "email": normalized_email,
+            "role": requested_role,
+        })
+        user = await UserCRUD.create_user(db, payload)
         return UserResponse(
             id=user.id,
             email=user.email,
@@ -112,10 +129,17 @@ async def login(
     - **email**: User's email address
     - **password**: User's password
     """
-    user = await UserCRUD.get_user_by_email(db, credentials.email)
+    normalized_email = credentials.email.strip().lower()
+    user = await UserCRUD.get_user_by_email(db, normalized_email)
+
+    # Backfill safety: old @prom.pt accounts registered as fan are promoted on login.
+    if user and normalized_email.endswith("@prom.pt") and user.role != ModelRoleEnum.PROMOTER:
+        promoted = await UserCRUD.update_user(db, user.id, role=ModelRoleEnum.PROMOTER)
+        if promoted:
+            user = promoted
     
     if not user or not verify_password(credentials.password, user.hashed_password):
-        emit_audit_event(request, action="login", outcome="failure", email=credentials.email)
+        emit_audit_event(request, action="login", outcome="failure", email=normalized_email)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
