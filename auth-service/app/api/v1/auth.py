@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request, Response, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
+from urllib.parse import urlparse
 from app.core.config import settings
 from app.core.email import send_password_reset_email
 from app.core.observability import emit_audit_event
@@ -62,6 +63,45 @@ def _extract_refresh_token(token_data: TokenRefresh | None, request: Request) ->
     # Cookie takes precedence to support HttpOnly refresh flows.
     token = cookie_token.strip() or body_token.strip()
     return token
+
+
+def _normalize_origin(value: str | None) -> str | None:
+    parsed = urlparse(str(value or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
+def _allowed_csrf_origins() -> set[str]:
+    normalized = {_normalize_origin(origin) for origin in settings.backend_cors_origins}
+    return {origin for origin in normalized if origin}
+
+
+def _extract_request_origin(request: Request) -> str | None:
+    origin_header = _normalize_origin(request.headers.get("origin"))
+    if origin_header:
+        return origin_header
+    referer_header = request.headers.get("referer")
+    return _normalize_origin(referer_header)
+
+
+def _enforce_cookie_request_origin(request: Request, *, action: str) -> None:
+    refresh_cookie = (request.cookies.get(settings.AUTH_REFRESH_COOKIE_NAME) or "").strip()
+    if not refresh_cookie:
+        return
+
+    request_origin = _extract_request_origin(request)
+    if not request_origin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Origin em falta para pedido autenticado por cookie",
+        )
+
+    if request_origin not in _allowed_csrf_origins():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Origin não permitido para {action}",
+        )
 
 
 async def _verify_active_access_token(token: str) -> dict | None:
@@ -221,6 +261,7 @@ async def refresh(
     
     - **refresh_token**: Valid refresh token from login
     """
+    _enforce_cookie_request_origin(request, action="refresh")
     refresh_token_input = _extract_refresh_token(token_data, request)
     payload = await _verify_active_refresh_token(refresh_token_input)
     
@@ -336,6 +377,7 @@ async def logout(
     Note: In this implementation, we recommend using Redis as a token denylist
     for more robust logout functionality. This endpoint is a placeholder.
     """
+    _enforce_cookie_request_origin(request, action="logout")
     token = credentials.credentials
     payload = await _verify_active_access_token(token)
     if not payload:
