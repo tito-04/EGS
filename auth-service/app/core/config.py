@@ -16,6 +16,14 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 15
+
+    # Refresh token cookie
+    AUTH_REFRESH_COOKIE_NAME: str = "egs_refresh_token"
+    AUTH_REFRESH_COOKIE_DOMAIN: Optional[str] = None
+    AUTH_REFRESH_COOKIE_PATH: str = "/"
+    AUTH_REFRESH_COOKIE_SAMESITE: str = "lax"
+    AUTH_REFRESH_COOKIE_SECURE: bool = False
+    AUTH_REFRESH_COOKIE_HTTPONLY: bool = True
     
     # Service
     ENVIRONMENT: str = "development"
@@ -95,6 +103,14 @@ class Settings(BaseSettings):
             parsed = urlparse(origin)
             if parsed.scheme != "https" or self._is_local_hostname(parsed.hostname):
                 raise ValueError("BACKEND_CORS_ORIGINS must only include HTTPS non-local origins in production")
+
+        samesite = self.AUTH_REFRESH_COOKIE_SAMESITE.strip().lower()
+        if samesite not in {"strict", "lax", "none"}:
+            raise ValueError("AUTH_REFRESH_COOKIE_SAMESITE must be strict, lax, or none")
+        if not self.AUTH_REFRESH_COOKIE_SECURE:
+            raise ValueError("AUTH_REFRESH_COOKIE_SECURE must be true in production")
+        if samesite == "none":
+            raise ValueError("AUTH_REFRESH_COOKIE_SAMESITE=none is not allowed in production")
 
 
 settings = Settings()

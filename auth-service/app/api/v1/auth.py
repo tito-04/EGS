@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request, Response, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
@@ -29,6 +29,39 @@ from app.core.security import (
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 bearer_scheme = HTTPBearer()
+
+
+def _refresh_cookie_max_age_seconds() -> int:
+    return max(1, int(settings.REFRESH_TOKEN_EXPIRE_DAYS) * 24 * 60 * 60)
+
+
+def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
+    response.set_cookie(
+        key=settings.AUTH_REFRESH_COOKIE_NAME,
+        value=refresh_token,
+        max_age=_refresh_cookie_max_age_seconds(),
+        httponly=settings.AUTH_REFRESH_COOKIE_HTTPONLY,
+        secure=settings.AUTH_REFRESH_COOKIE_SECURE,
+        samesite=settings.AUTH_REFRESH_COOKIE_SAMESITE,
+        path=settings.AUTH_REFRESH_COOKIE_PATH,
+        domain=settings.AUTH_REFRESH_COOKIE_DOMAIN,
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=settings.AUTH_REFRESH_COOKIE_NAME,
+        path=settings.AUTH_REFRESH_COOKIE_PATH,
+        domain=settings.AUTH_REFRESH_COOKIE_DOMAIN,
+    )
+
+
+def _extract_refresh_token(token_data: TokenRefresh | None, request: Request) -> str:
+    body_token = (token_data.refresh_token if token_data else None) or ""
+    cookie_token = request.cookies.get(settings.AUTH_REFRESH_COOKIE_NAME) or ""
+    # Cookie takes precedence to support HttpOnly refresh flows.
+    token = cookie_token.strip() or body_token.strip()
+    return token
 
 
 async def _verify_active_access_token(token: str) -> dict | None:
@@ -120,6 +153,7 @@ async def register(
 @limiter.limit(settings.RATE_LIMIT_LOGIN)
 async def login(
     request: Request,
+    response: Response,
     credentials: UserLogin,
     db: AsyncSession = Depends(get_db)
 ) -> TokenResponse:
@@ -159,6 +193,7 @@ async def login(
     refresh_token = create_refresh_token(
         data={"sub": user.id}
     )
+    _set_refresh_cookie(response, refresh_token)
     
     emit_audit_event(
         request,
@@ -177,7 +212,8 @@ async def login(
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh(
     request: Request,
-    token_data: TokenRefresh,
+    response: Response,
+    token_data: TokenRefresh | None = Body(default=None),
     db: AsyncSession = Depends(get_db)
 ) -> TokenResponse:
     """
@@ -185,7 +221,8 @@ async def refresh(
     
     - **refresh_token**: Valid refresh token from login
     """
-    payload = await _verify_active_refresh_token(token_data.refresh_token)
+    refresh_token_input = _extract_refresh_token(token_data, request)
+    payload = await _verify_active_refresh_token(refresh_token_input)
     
     if not payload:
         emit_audit_event(request, action="refresh", outcome="failure")
@@ -216,7 +253,7 @@ async def refresh(
     )
     
     try:
-        await denylist_refresh_token(token_data.refresh_token)
+        await denylist_refresh_token(refresh_token_input)
     except RuntimeError:
         emit_audit_event(request, action="refresh", outcome="error", user_id=user.id)
         raise HTTPException(
@@ -226,6 +263,7 @@ async def refresh(
 
     # Rotate refresh token: old refresh token is revoked, new one is minted.
     refresh_token = create_refresh_token(data={"sub": user.id})
+    _set_refresh_cookie(response, refresh_token)
     
     emit_audit_event(
         request,
@@ -289,6 +327,7 @@ async def get_current_user(
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
     request: Request,
+    response: Response,
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
 ) -> None:
     """
@@ -308,6 +347,10 @@ async def logout(
         )
 
     await denylist_access_token(token)
+    refresh_cookie_token = (request.cookies.get(settings.AUTH_REFRESH_COOKIE_NAME) or "").strip()
+    if refresh_cookie_token:
+        await denylist_refresh_token(refresh_cookie_token)
+    _clear_refresh_cookie(response)
     emit_audit_event(
         request,
         action="logout",

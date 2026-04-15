@@ -116,6 +116,7 @@
       try {
         const response = await fetch(`${API_URL}/auth/login`, {
           method: "POST",
+          credentials: "include",
           headers: {
             "Content-Type": "application/json"
           },
@@ -136,8 +137,6 @@
           throw new Error(extractErrorMessage(data, "Invalid login credentials."));
         }
 
-        // Save token to localStorage
-        localStorage.setItem("access_token", data.access_token);
         const redirectTo = await createBrowserHandoff(data);
         successMsg.textContent = redirectTo ? "Login successful! Returning to your service..." : "Login successful!";
         successMsg.style.display = "block";

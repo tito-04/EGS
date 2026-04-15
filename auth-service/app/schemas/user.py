@@ -82,7 +82,7 @@ class TokenResponse(BaseModel):
 
 class TokenRefresh(BaseModel):
     """Schema for token refresh request."""
-    refresh_token: str
+    refresh_token: Optional[str] = None
 
 
 class TokenVerifyRequest(BaseModel):
