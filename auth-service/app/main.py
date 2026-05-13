@@ -13,6 +13,7 @@ from app.core.observability import (
 from app.core.rate_limit import limiter
 from app.core.redis_client import init_redis, close_redis
 from app.db import init_db
+from app.api import kpi
 from app.api.v1 import auth
 
 
@@ -84,6 +85,7 @@ async def health_check():
 
 
 # Include routers
+app.include_router(kpi.router)
 app.include_router(auth.router, prefix=settings.API_V1_STR)
 
 
