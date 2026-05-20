@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -30,8 +32,22 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
+def _strip_public_prefix(scope, prefixes):
+    path = scope.get("path", "")
+    for prefix in prefixes:
+        if path == prefix:
+            scope["path"] = "/"
+            scope["root_path"] = prefix
+            return
+        if path.startswith(f"{prefix}/"):
+            scope["path"] = path[len(prefix):] or "/"
+            scope["root_path"] = prefix
+            return
+
+
 @app.middleware("http")
 async def request_context_middleware(request, call_next):
+    _strip_public_prefix(request.scope, ("/auth", "/payment-auth"))
     request_id, correlation_id = initialize_request_context(request)
     started_at = now_monotonic()
 
@@ -39,6 +55,7 @@ async def request_context_middleware(request, call_next):
 
     response.headers["X-Request-ID"] = request_id
     response.headers["X-Correlation-ID"] = correlation_id
+    response.headers["X-Pod-Name"] = os.getenv("POD_NAME") or os.getenv("HOSTNAME", "unknown")
     log_request(request, response.status_code, (now_monotonic() - started_at) * 1000)
     return response
 
